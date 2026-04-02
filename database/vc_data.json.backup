@@ -1,0 +1,10 @@
+{
+  "guild_configs": {
+    "1419255118561415240": {
+      "vc_channel_id": 1420699880581759028,
+      "auto_rejoin": true,
+      "mute_on_join": true,
+      "join_delay": 5
+    }
+  }
+}
