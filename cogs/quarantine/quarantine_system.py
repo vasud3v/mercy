@@ -1048,6 +1048,288 @@ class ImprovedMuteCog(commands.Cog):
         # Simple success message
         await ctx.send(f"<a:white_tick:1426439810733572136> **Member Unmuted Successfully** • {member.mention}")
 
+    # ==================== SLASH COMMANDS ====================
+    
+    @app_commands.command(name="quarantine", description="Quarantine a member (mute)")
+    @app_commands.describe(
+        member="The member to quarantine",
+        duration="Duration (e.g., 30s, 10m, 2h, 1d) - leave empty for permanent",
+        reason="Reason for quarantine"
+    )
+    @app_commands.guild_only()
+    async def slash_quarantine(self, interaction: discord.Interaction, member: discord.Member, duration: Optional[str] = None, reason: Optional[str] = None):
+        """Slash command version of quarantine"""
+        await interaction.response.defer(ephemeral=False)
+        
+        guild = interaction.guild
+        cfg = guild_configs.find_one({"guild_id": guild.id})
+        if not cfg:
+            return await interaction.followup.send("Mute system not configured. Ask an admin to run /setup-mute.", ephemeral=True)
+        
+        # Permission check
+        allowed = interaction.user.guild_permissions.administrator
+        if not allowed:
+            mod_role_id = cfg.get("mod_role_id")
+            if mod_role_id:
+                mr = guild.get_role(mod_role_id)
+                if not mr:
+                    return await interaction.followup.send("<:alert:1426440385269338164> Moderator role not found or has been deleted.", ephemeral=True)
+                if mr in interaction.user.roles:
+                    allowed = True
+        if not allowed:
+            return await interaction.followup.send("You don't have permission to use this command.", ephemeral=True)
+
+        # Prevent self-mute
+        if member.id == interaction.user.id:
+            return await interaction.followup.send("<:alert:1426440385269338164> You cannot mute yourself.", ephemeral=True)
+        
+        # Prevent bot mute
+        if member.id == self.bot.user.id:
+            return await interaction.followup.send("<:alert:1426440385269338164> I cannot mute myself.", ephemeral=True)
+        
+        if member.bot:
+            return await interaction.followup.send("<:alert:1426440385269338164> Cannot mute bots.", ephemeral=True)
+
+        can_manage, why = await self._can_manage_member(guild, member)
+        if not can_manage:
+            return await interaction.followup.send(f"<:alert:1426440385269338164> I cannot mute that member: {why}", ephemeral=True)
+
+        ok, why = self._actor_can_target(guild, interaction.user, member)
+        if not ok:
+            return await interaction.followup.send(f"<:alert:1426440385269338164> You cannot mute that member: {why}", ephemeral=True)
+
+        # Parse duration
+        expires_at = None
+        if duration:
+            dur = parse_duration(duration)
+            if dur:
+                expires_at = utc_now() + dur
+            else:
+                if reason:
+                    reason = f"{duration} {reason}"
+                else:
+                    reason = duration
+        
+        if not reason:
+            reason = "No reason provided"
+
+        already = mutes_col.find_one({"guild_id": guild.id, "user_id": member.id, "active": True})
+        if already:
+            return await interaction.followup.send(f"{member.mention} is already muted.", ephemeral=True)
+
+        muted_role = guild.get_role(cfg.get("muted_role_id"))
+        jail_ch = guild.get_channel(cfg.get("jail_channel_id"))
+        log_ch = guild.get_channel(cfg.get("log_channel_id"))
+        if not muted_role or not jail_ch or not log_ch:
+            return await interaction.followup.send("Configuration invalid or incomplete. Re-run /setup-mute.", ephemeral=True)
+
+        me = guild.me
+        if muted_role >= me.top_role:
+            return await interaction.followup.send("Muted role is equal/higher than my top role. Move my highest role above Muted.", ephemeral=True)
+
+        try:
+            await member.add_roles(muted_role, reason=f"Muted by {interaction.user} | {reason[:100]}")
+        except discord.Forbidden:
+            return await interaction.followup.send("Failed to add Muted role — check bot role hierarchy and Manage Roles permission.", ephemeral=True)
+        except discord.HTTPException as e:
+            return await interaction.followup.send(f"Failed to add Muted role: {str(e)[:100]}", ephemeral=True)
+
+        case = self._next_case(guild.id)
+
+        doc = {
+            "guild_id": guild.id,
+            "user_id": member.id,
+            "muted_by_id": interaction.user.id,
+            "reason": reason[:2000],
+            "muted_at": utc_now(),
+            "active": True,
+            "case_id": case
+        }
+        if expires_at:
+            doc["expires_at"] = expires_at
+        try:
+            mutes_col.insert_one(doc)
+        except Exception:
+            pass
+
+        # DM the user
+        dm_was_sent = False
+        dm_error_reason = None
+        try:
+            dm = await member.create_dm()
+            
+            if expires_at:
+                try:
+                    timestamp = safe_timestamp(expires_at)
+                    expiry_text = f"<t:{timestamp}:R>"
+                except:
+                    expiry_text = "Manual unmute"
+            else:
+                expiry_text = "Manual unmute"
+            
+            reason_short = reason[:DM_REASON_MAX_LENGTH] if len(reason) <= DM_REASON_MAX_LENGTH else f"{reason[:DM_REASON_MAX_LENGTH-3]}..."
+            dm_text = f"<a:heartspark_ogs:1427918324066422834> **Muted in {guild.name}** • Case #{case} • Expires {expiry_text} • {reason_short}"
+            
+            view = AppealButton(guild.id, case)
+            dm_msg = await dm.send(content=dm_text, view=view)
+            
+            expires = utc_now() + timedelta(minutes=DM_AUTO_DELETE_MINUTES)
+            ins = pending_dm_deletes.insert_one({
+                "guild_id": guild.id,
+                "user_id": member.id,
+                "dm_message_id": dm_msg.id,
+                "expires_at": expires
+            })
+            self.bot.loop.create_task(self._schedule_delete_dm(ins.inserted_id, DM_AUTO_DELETE_MINUTES * 60))
+            dm_was_sent = True
+        except discord.Forbidden:
+            dm_error_reason = "User has DMs disabled or blocked the bot"
+        except Exception:
+            dm_error_reason = "Unexpected error"
+
+        # Log embed
+        embed = discord.Embed(
+            title=f"<a:heartspark_ogs:1427918324066422834> Member Muted — Case #{case}",
+            description=f"**{member.mention}** has been muted and moved to the quarantine zone.",
+            color=Colors.MUTE,
+            timestamp=utc_now()
+        )
+        try:
+            embed.set_thumbnail(url=member.display_avatar.url)
+        except:
+            pass
+        embed.add_field(name="<:Ogs_member:1427922355879022672> Member", value=f"{member.mention}\n`{member} ({member.id})`", inline=True)
+        embed.add_field(name="<:original_vc_mo:1427922033211342878> Moderator", value=f"{interaction.user.mention}\n`{interaction.user} ({interaction.user.id})`", inline=True)
+        embed.add_field(name="\u200b", value="\u200b", inline=True)
+        embed.add_field(name="<:ogs_bell:1427918360401940552> Reason", value=f"```{reason[:1000]}```", inline=False)
+        if expires_at:
+            try:
+                timestamp = safe_timestamp(expires_at)
+                embed.add_field(name="<:sukoon_blackdot:1427918583136260136> Expires", value=f"<t:{timestamp}:F>\n<t:{timestamp}:R>", inline=False)
+            except:
+                embed.add_field(name="<:sukoon_blackdot:1427918583136260136> Expires", value=str(expires_at), inline=False)
+        else:
+            embed.add_field(name="<:sukoon_blackdot:1427918583136260136> Duration", value="<:alert:1426440385269338164> Manual unmute required", inline=False)
+        
+        footer_icon = None
+        try:
+            if guild and guild.icon:
+                footer_icon = guild.icon.url
+        except:
+            pass
+        
+        if dm_was_sent:
+            embed.set_footer(text="✉️ User notified via DM (auto-deletes in 10 minutes)", icon_url=footer_icon)
+        else:
+            footer_text = "⚠️ Could not send DM to user"
+            if dm_error_reason:
+                footer_text += f" - {dm_error_reason}"
+            embed.set_footer(text=footer_text, icon_url=footer_icon)
+        try:
+            await log_ch.send(embed=embed)
+        except:
+            pass
+
+        await interaction.followup.send(f"<a:white_tick:1426439810733572136> **Member Muted Successfully** • {member.mention}")
+
+    @app_commands.command(name="unquarantine", description="Unquarantine a member (unmute)")
+    @app_commands.describe(
+        member="The member to unquarantine",
+        reason="Reason for unquarantine"
+    )
+    @app_commands.guild_only()
+    async def slash_unquarantine(self, interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = None):
+        """Slash command version of unquarantine"""
+        await interaction.response.defer(ephemeral=False)
+        
+        guild = interaction.guild
+        cfg = guild_configs.find_one({"guild_id": guild.id})
+        if not cfg:
+            return await interaction.followup.send("Mute system not configured.", ephemeral=True)
+        
+        # Permission check
+        allowed = interaction.user.guild_permissions.administrator
+        if not allowed:
+            mod_role_id = cfg.get("mod_role_id")
+            if mod_role_id:
+                role = guild.get_role(mod_role_id)
+                if role and role in interaction.user.roles:
+                    allowed = True
+        if not allowed:
+            return await interaction.followup.send("You don't have permission to use this command.", ephemeral=True)
+        
+        if member.id == interaction.user.id:
+            return await interaction.followup.send("<:alert:1426440385269338164> You cannot unmute yourself.", ephemeral=True)
+
+        ok, why = self._actor_can_target(guild, interaction.user, member)
+        if not ok:
+            return await interaction.followup.send(f"<:alert:1426440385269338164> You cannot unmute that member: {why}", ephemeral=True)
+
+        muted_role = guild.get_role(cfg.get("muted_role_id"))
+        log_ch = guild.get_channel(cfg.get("log_channel_id"))
+        if not muted_role:
+            return await interaction.followup.send("Muted role missing. Re-run /setup-mute.", ephemeral=True)
+
+        doc = mutes_col.find_one({"guild_id": guild.id, "user_id": member.id, "active": True})
+        if not doc:
+            return await interaction.followup.send(f"{member.mention} is not currently muted.", ephemeral=True)
+
+        try:
+            await member.remove_roles(muted_role, reason=f"Unmuted by {interaction.user}")
+        except:
+            pass
+
+        unmute_reason = reason if reason else "Manual unmute"
+        try:
+            mutes_col.update_many({"guild_id": guild.id, "user_id": member.id, "active": True}, {"$set": {
+                "active": False, "unmuted_at": utc_now(), "unmuted_by_id": interaction.user.id, "unmute_reason": unmute_reason
+            }})
+        except:
+            pass
+
+        case = doc.get("case_id", "N/A")
+        embed = discord.Embed(
+            title=f"<a:heartspark_ogs:1427918324066422834> Member Unmuted — Case #{case}",
+            description=f"**{member.mention}** has been unmuted and can now access the server.",
+            color=Colors.UNMUTE,
+            timestamp=utc_now()
+        )
+        try:
+            embed.set_thumbnail(url=member.display_avatar.url)
+        except:
+            pass
+        embed.add_field(name="<:Ogs_member:1427922355879022672> Member", value=f"{member.mention}\n`{member} ({member.id})`", inline=True)
+        embed.add_field(name="<:original_vc_mo:1427922033211342878> Moderator", value=f"{interaction.user.mention}\n`{interaction.user} ({interaction.user.id})`", inline=True)
+        embed.add_field(name="\u200b", value="\u200b", inline=True)
+        muted_at = doc.get("muted_at")
+        if muted_at and isinstance(muted_at, datetime):
+            try:
+                timestamp = safe_timestamp(muted_at)
+                embed.add_field(name="<:sukoon_blackdot:1427918583136260136> Originally Muted", value=f"<t:{timestamp}:F>", inline=False)
+            except:
+                pass
+        footer_icon = None
+        try:
+            if guild and guild.icon:
+                footer_icon = guild.icon.url
+        except:
+            pass
+        embed.set_footer(text="✅ Mute successfully removed", icon_url=footer_icon)
+        try:
+            await log_ch.send(embed=embed)
+        except:
+            pass
+
+        # DM user
+        try:
+            dm = await member.create_dm()
+            dm_text = f"<a:heartspark_ogs:1427918324066422834> **Unmuted in {guild.name}** • Case #{case}"
+            await dm.send(content=dm_text)
+        except:
+            pass
+
+        await interaction.followup.send(f"<a:white_tick:1426439810733572136> **Member Unmuted Successfully** • {member.mention}")
+
     @commands.command(name="mutelist")
     @commands.guild_only()
     async def mutelist(self, ctx: commands.Context):
