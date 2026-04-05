@@ -53,8 +53,10 @@ class ConnectionManager:
                 if channel.guild.voice_client.is_connected():
                     if channel.guild.voice_client.channel and channel.guild.voice_client.channel.id == channel.id:
                         # Already connected to the correct channel, nothing to do
+                        logger.debug(f"Already connected to channel {channel.id} in guild {guild_id}")
                         return True
                     # Connected to wrong channel - need to disconnect first
+                    logger.info(f"Disconnecting from wrong channel in guild {guild_id}")
                     try:
                         await channel.guild.voice_client.disconnect(force=True)
                         await asyncio.sleep(2)
@@ -66,6 +68,14 @@ class ConnectionManager:
                             await asyncio.sleep(3)
                         except:
                             pass
+                else:
+                    # Voice client exists but not connected - clean it up
+                    logger.warning(f"Found disconnected voice client in guild {guild_id}, cleaning up")
+                    try:
+                        await channel.guild.voice_client.disconnect(force=True)
+                        await asyncio.sleep(1)
+                    except:
+                        pass
                     
             self.last_attempt[guild_id] = current_time
             try:
@@ -86,6 +96,11 @@ class ConnectionManager:
                 # Double-check we're actually disconnected before attempting to connect
                 if channel.guild.voice_client and channel.guild.voice_client.is_connected():
                     logger.error(f"Failed to disconnect existing voice client in guild {guild_id}")
+                    return False
+
+                # Final check before connecting
+                if channel.guild.voice_client and channel.guild.voice_client.is_connected():
+                    logger.error(f"Voice client still connected after disconnect attempts in guild {guild_id}")
                     return False
 
                 # Try to connect
@@ -110,8 +125,16 @@ class ConnectionManager:
                     if "Already connected" in str(e):
                         logger.debug(f"Already connected error in guild {guild_id}, attempting recovery")
                         try:
+                            # First check if we're already in the right channel
+                            if channel.guild.voice_client and channel.guild.voice_client.is_connected():
+                                if channel.guild.voice_client.channel and channel.guild.voice_client.channel.id == channel.id:
+                                    logger.debug(f"Already in correct channel {channel.id} in guild {guild_id}")
+                                    return True
+                            
+                            # Force disconnect and cleanup
                             await channel.guild.change_voice_state(channel=None)
                             await asyncio.sleep(3)
+                            
                             # Try one more time after cleanup
                             try:
                                 voice_client = await channel.connect(
@@ -125,11 +148,20 @@ class ConnectionManager:
                                     voice_client.self_mute = True
                                     voice_client.self_deaf = True
                                     self.connection_attempts[guild_id] = 0
+                                    logger.info(f"Successfully recovered connection in guild {guild_id}")
                                     return True
-                            except:
-                                pass
-                        except:
-                            pass
+                            except discord.ClientException as retry_e:
+                                if "Already connected" in str(retry_e):
+                                    # Still getting this error, likely already connected
+                                    logger.debug(f"Still connected after recovery attempt in guild {guild_id}")
+                                    return True  # Treat as success since we're connected
+                                logger.error(f"Retry connection failed: {str(retry_e)}")
+                            except Exception as retry_e:
+                                logger.error(f"Retry connection failed: {str(retry_e)}")
+                        except Exception as cleanup_e:
+                            logger.error(f"Cleanup failed: {str(cleanup_e)}")
+                    else:
+                        logger.error(f"ClientException during connection: {str(e)}")
                     return False
                 except Exception as e:
                     logger.error(f"Connection failed: {str(e)}")

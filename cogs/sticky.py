@@ -46,7 +46,7 @@ class StickyMessages(commands.Cog):
         
         # Configuration
         self.repost_cooldown = 2.5  # seconds between reposts in same channel
-        self.auto_refresh_interval = 10  # minutes
+        self.auto_refresh_interval = 30  # minutes - auto delete and resend stickies
         self.max_content_length = 2000  # Discord limit
 
     # ==================== Lifecycle ====================
@@ -390,8 +390,8 @@ class StickyMessages(commands.Cog):
                         last_timestamp = sticky_info.get("timestamp")
                         if last_timestamp:
                             time_diff = datetime.utcnow() - last_timestamp
-                            # Only refresh if at least 9.5 minutes have passed
-                            if time_diff < timedelta(minutes=9, seconds=30):
+                            # Only refresh if at least 29.5 minutes have passed
+                            if time_diff < timedelta(minutes=29, seconds=30):
                                 skipped += 1
                                 continue
                     

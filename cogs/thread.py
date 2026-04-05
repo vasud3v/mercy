@@ -313,6 +313,14 @@ class ThreadCreatorCog(commands.Cog):
                 
             except discord.HTTPException as e:
                 # Generic HTTP error
+                # Check if it's an "Unknown Message" error (10008) - message was deleted
+                if e.code == 10008:
+                    logger.warning(
+                        f"Message was deleted before thread could be created: "
+                        f"guild={guild_id} channel={channel_id} user={user_id}"
+                    )
+                    break  # Don't retry if message no longer exists
+                
                 if attempt < max_retries - 1:
                     # Retry with exponential backoff
                     wait_time = retry_delay * (2 ** attempt)
