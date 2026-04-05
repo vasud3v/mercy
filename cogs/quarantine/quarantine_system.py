@@ -678,16 +678,16 @@ class ImprovedMuteCog(commands.Cog):
         embed.set_footer(text=f"Updated by {ctx.author}", icon_url=ctx.author.display_avatar.url)
         await ctx.send(embed=embed)
 
-    @commands.command(name="qmute")
+    @commands.command(name="quarantine", aliases=["qmute"])
     @commands.guild_only()
     async def qmute(self, ctx: commands.Context, member: str, duration: Optional[str] = None, *, reason: Optional[str] = None):
         """
-        Mute a member - Simple and easy to use!
+        Quarantine a member - Simple and easy to use!
         
         Usage:
-         !qmute @user
-         !qmute @user spam
-         !qmute @user 10m spamming links
+         !quarantine @user
+         !quarantine @user spam
+         !quarantine @user 10m spamming links
          !qmute @user 1h repeated warnings
         
         Duration formats: 30s, 10m, 2h, 1d
@@ -917,7 +917,7 @@ class ImprovedMuteCog(commands.Cog):
         # Simple success message
         await ctx.send(f"<a:white_tick:1426439810733572136> **Member Muted Successfully** • {member.mention}")
 
-    @commands.command(name="qunmute")
+    @commands.command(name="unquarantine", aliases=["qunmute"])
     @commands.guild_only()
     async def qunmute(self, ctx: commands.Context, member: str, *, reason: Optional[str] = None):
         """
