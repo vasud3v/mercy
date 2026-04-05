@@ -678,7 +678,7 @@ class ImprovedMuteCog(commands.Cog):
         embed.set_footer(text=f"Updated by {ctx.author}", icon_url=ctx.author.display_avatar.url)
         await ctx.send(embed=embed)
 
-    @commands.command(name="qmute", aliases=["mute"])
+    @commands.command(name="qmute")
     @commands.guild_only()
     async def qmute(self, ctx: commands.Context, member: str, duration: Optional[str] = None, *, reason: Optional[str] = None):
         """
@@ -917,7 +917,7 @@ class ImprovedMuteCog(commands.Cog):
         # Simple success message
         await ctx.send(f"<a:white_tick:1426439810733572136> **Member Muted Successfully** • {member.mention}")
 
-    @commands.command(name="qunmute", aliases=["unmute"])
+    @commands.command(name="qunmute")
     @commands.guild_only()
     async def qunmute(self, ctx: commands.Context, member: str, *, reason: Optional[str] = None):
         """
