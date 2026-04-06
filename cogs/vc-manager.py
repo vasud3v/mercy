@@ -61,6 +61,13 @@ class VoiceManager(commands.Cog):
         try:
             voice_client = await channel.connect()
             return voice_client
+        except discord.ClientException as e:
+            # Suppress "Already connected" errors as they're not actual errors
+            if "Already connected" in str(e):
+                logger.debug(f"Already connected to a voice channel: {e}")
+            else:
+                logger.error(f"Failed to join channel: {e}")
+            return None
         except Exception as e:
             logger.error(f"Failed to join channel: {e}")
             return None
